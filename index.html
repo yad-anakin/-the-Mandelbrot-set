@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Fractal Explorer — Mandelbrot</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #eee; font-family: system-ui, sans-serif; overflow: hidden; }
+  #canvas { display: block; cursor: crosshair; image-rendering: pixelated; }
+  #hud {
+    position: fixed; top: 10px; left: 10px; padding: 10px 12px;
+    background: rgba(0,0,0,0.6); border: 1px solid #333; border-radius: 8px;
+    font-size: 12px; line-height: 1.55; max-width: 320px; user-select: none;
+  }
+  #hud b { color: #ffd166; }
+  #hud .row { margin-top: 4px; }
+  button, select { background:#222; color:#eee; border:1px solid #444; border-radius:4px; padding:4px 8px; cursor:pointer; font: inherit; }
+  button:hover { background:#333; }
+  kbd { background:#111; border:1px solid #444; padding:1px 5px; border-radius:3px; font-size: 11px; }
+  #status { position: fixed; bottom: 10px; right: 10px; font-size: 11px; color:#aaa; background:rgba(0,0,0,0.5); padding:4px 8px; border-radius:4px; }
+  #warn { color:#f88; font-size: 11px; display:none; margin-top:4px; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+
+<div id="hud">
+  <div><b>Fractal Explorer</b></div>
+  <div class="row">
+    <kbd>Click</kbd> zoom in &nbsp; <kbd>Shift+Click</kbd> zoom out<br>
+    <kbd>Drag</kbd> pan &nbsp; <kbd>Wheel</kbd> zoom<br>
+    <kbd>+</kbd>/<kbd>-</kbd> iter &nbsp; <kbd>R</kbd> reset &nbsp; <kbd>S</kbd> save
+  </div>
+  <div class="row">
+    Fractal:
+    <select id="fractal">
+      <option value="mandelbrot">Mandelbrot</option>
+      <option value="julia">Julia (-0.8, 0.156)</option>
+      <option value="julia2">Julia (-0.4, 0.6)</option>
+      <option value="burningship">Burning Ship</option>
+      <option value="tricorn">Tricorn</option>
+    </select>
+  </div>
+  <div class="row">
+    Palette:
+    <select id="palette">
+      <option value="0">Electric</option>
+      <option value="1">Fire</option>
+      <option value="2">Ice</option>
+      <option value="3">Rainbow</option>
+      <option value="4">Grayscale</option>
+    </select>
+  </div>
+  <div class="row">
+    Iter: <span id="iter">0</span> &nbsp; Zoom: <span id="zoom">1x</span><br>
+    Center: <span id="center"></span>
+  </div>
+  <div class="row">
+    <button id="reset">Reset</button>
+    <button id="save">Save PNG</button>
+  </div>
+  <div id="warn">Approaching float64 precision limit — pixels will pixelate.</div>
+</div>
+<div id="status">ready</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const iterEl = document.getElementById('iter');
+const zoomEl = document.getElementById('zoom');
+const centerEl = document.getElementById('center');
+const statusEl = document.getElementById('status');
+const warnEl = document.getElementById('warn');
+const fractalSel = document.getElementById('fractal');
+const paletteSel = document.getElementById('palette');
+
+const STATE = {
+  cx: -0.5, cy: 0, scale: 3.5,
+  baseIter: 256,
+  iterBoost: 0,
+  fractal: 'mandelbrot',
+  palette: 0,
+  W: 0, H: 0,
+};
+
+let renderToken = 0;
+
+function resize() {
+  STATE.W = canvas.width = Math.floor(window.innerWidth * window.devicePixelRatio);
+  STATE.H = canvas.height = Math.floor(window.innerHeight * window.devicePixelRatio);
+  canvas.style.width = window.innerWidth + 'px';
+  canvas.style.height = window.innerHeight + 'px';
+  scheduleRender();
+}
+window.addEventListener('resize', resize);
+
+// --- Palettes ---
+function palette(t, type) {
+  // t in [0,1]
+  let r=0,g=0,b=0;
+  if (type === 0) { // Electric
+    r = 9*(1-t)*t*t*t*255;
+    g = 15*(1-t)*(1-t)*t*t*255;
+    b = 8.5*(1-t)*(1-t)*(1-t)*t*255;
+  } else if (type === 1) { // Fire
+    r = Math.min(255, 255*Math.pow(t,0.4));
+    g = 255*Math.pow(t,1.5);
+    b = 255*Math.pow(t,3.5);
+  } else if (type === 2) { // Ice
+    r = 255*Math.pow(t,3);
+    g = 255*Math.pow(t,1.4);
+    b = Math.min(255, 255*Math.pow(t,0.5));
+  } else if (type === 3) { // Rainbow
+    const h = (t*5) % 1;
+    const s=0.85, v=t<0.02?0:1;
+    const f = (n,k=(n+h*6)%6)=>v - v*s*Math.max(Math.min(k,4-k,1),0);
+    r=f(5)*255; g=f(3)*255; b=f(1)*255;
+  } else { // Gray
+    r=g=b=255*t;
+  }
+  return [r|0,g|0,b|0];
+}
+
+// --- Iteration kernels ---
+function iterate(x0, y0, maxIter, fractal) {
+  let x=0, y=0, x2=0, y2=0, i=0;
+  if (fractal === 'mandelbrot') {
+    // cardioid/bulb shortcut
+    const q = (x0-0.25)*(x0-0.25) + y0*y0;
+    if (q*(q + (x0-0.25)) <= 0.25*y0*y0) return maxIter;
+    if ((x0+1)*(x0+1) + y0*y0 <= 0.0625) return maxIter;
+    while (x2+y2 <= 256 && i < maxIter) {
+      y = 2*x*y + y0;
+      x = x2 - y2 + x0;
+      x2 = x*x; y2 = y*y;
+      i++;
+    }
+  } else if (fractal === 'julia') {
+    x = x0; y = y0;
+    const cx = -0.8, cy = 0.156;
+    while ((x2=x*x)+(y2=y*y) <= 256 && i < maxIter) {
+      const ny = 2*x*y + cy;
+      x = x2 - y2 + cx;
+      y = ny;
+      i++;
+    }
+  } else if (fractal === 'julia2') {
+    x = x0; y = y0;
+    const cx = -0.4, cy = 0.6;
+    while ((x2=x*x)+(y2=y*y) <= 256 && i < maxIter) {
+      const ny = 2*x*y + cy;
+      x = x2 - y2 + cx;
+      y = ny;
+      i++;
+    }
+  } else if (fractal === 'burningship') {
+    while (x2+y2 <= 256 && i < maxIter) {
+      y = Math.abs(2*x*y) + y0;
+      x = x2 - y2 + x0;
+      x2 = x*x; y2 = y*y;
+      i++;
+    }
+  } else if (fractal === 'tricorn') {
+    while (x2+y2 <= 256 && i < maxIter) {
+      y = -2*x*y + y0;
+      x = x2 - y2 + x0;
+      x2 = x*x; y2 = y*y;
+      i++;
+    }
+  }
+  if (i >= maxIter) return maxIter;
+  // smooth iter
+  const log_zn = Math.log(x2+y2) * 0.5;
+  const nu = Math.log(log_zn / Math.log(2)) / Math.log(2);
+  return i + 1 - nu;
+}
+
+// --- Progressive renderer ---
+async function renderProgressive() {
+  const myToken = ++renderToken;
+  const { W, H, cx, cy, scale, fractal, palette: pal } = STATE;
+
+  const aspect = H / W;
+  const xMin = cx - scale/2;
+  const yMin = cy - (scale*aspect)/2;
+  const dx = scale / W;
+
+  const maxIter = Math.max(64, Math.floor((STATE.baseIter + 80*Math.log2(3.5/scale + 1)) * Math.pow(1.5, STATE.iterBoost)));
+  iterEl.textContent = maxIter;
+  zoomEl.textContent = (3.5/scale).toExponential(2) + 'x';
+  centerEl.textContent = cx.toFixed(15) + ', ' + cy.toFixed(15);
+  warnEl.style.display = (scale < 1e-13) ? 'block' : 'none';
+
+  const img = ctx.createImageData(W, H);
+  const data = img.data;
+
+  // Pass 1: coarse 8x8 blocks for instant feedback, then 4, 2, 1.
+  const passes = [8, 4, 2, 1];
+  for (const step of passes) {
+    statusEl.textContent = `rendering ${step}px…`;
+    for (let py = 0; py < H; py += step) {
+      const y0 = yMin + py * dx; // dy == dx (square pixels)
+      for (let px = 0; px < W; px += step) {
+        // Skip pixels already rendered in finer pass when step>1? we just overwrite blocks each pass.
+        const x0 = xMin + px * dx;
+        const it = iterate(x0, y0, maxIter, fractal);
+        let r,g,b;
+        if (it >= maxIter) { r=g=b=0; }
+        else {
+          const t = Math.sqrt(it / maxIter);
+          [r,g,b] = palette(t, pal);
+        }
+        // Fill block
+        const xEnd = Math.min(px+step, W);
+        const yEnd = Math.min(py+step, H);
+        for (let yy=py; yy<yEnd; yy++) {
+          let idx = (yy*W + px)*4;
+          for (let xx=px; xx<xEnd; xx++) {
+            data[idx]=r; data[idx+1]=g; data[idx+2]=b; data[idx+3]=255;
+            idx += 4;
+          }
+        }
+      }
+      // Yield periodically
+      if ((py & 31) === 0) {
+        ctx.putImageData(img, 0, 0);
+        await new Promise(r => setTimeout(r, 0));
+        if (myToken !== renderToken) return;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    if (myToken !== renderToken) return;
+  }
+  statusEl.textContent = 'done';
+}
+
+let renderTimer = null;
+function scheduleRender() {
+  clearTimeout(renderTimer);
+  renderTimer = setTimeout(renderProgressive, 30);
+}
+
+// --- Interaction ---
+let dragging=false, dragStart=null, viewStart=null, moved=0;
+canvas.addEventListener('mousedown', e => {
+  dragging = true; moved = 0;
+  dragStart = { x: e.clientX, y: e.clientY };
+  viewStart = { cx: STATE.cx, cy: STATE.cy };
+});
+window.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  const dxp = e.clientX - dragStart.x;
+  const dyp = e.clientY - dragStart.y;
+  moved = Math.hypot(dxp, dyp);
+  const ratio = STATE.scale / window.innerWidth;
+  STATE.cx = viewStart.cx - dxp * ratio;
+  STATE.cy = viewStart.cy - dyp * ratio;
+  scheduleRender();
+});
+window.addEventListener('mouseup', e => {
+  if (!dragging) return;
+  dragging = false;
+  if (moved < 3) {
+    const ratio = STATE.scale / window.innerWidth;
+    const wx = STATE.cx - STATE.scale/2 + e.clientX * ratio;
+    const wy = STATE.cy - (STATE.scale*window.innerHeight/window.innerWidth)/2 + e.clientY * ratio;
+    STATE.cx = wx; STATE.cy = wy;
+    STATE.scale *= e.shiftKey ? 2 : 0.4;
+    scheduleRender();
+  }
+});
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  const ratio = STATE.scale / window.innerWidth;
+  const wx = STATE.cx - STATE.scale/2 + e.clientX * ratio;
+  const wy = STATE.cy - (STATE.scale*window.innerHeight/window.innerWidth)/2 + e.clientY * ratio;
+  const factor = e.deltaY > 0 ? 1.25 : 1/1.25;
+  STATE.cx = wx + (STATE.cx - wx) * factor;
+  STATE.cy = wy + (STATE.cy - wy) * factor;
+  STATE.scale *= factor;
+  scheduleRender();
+}, { passive: false });
+
+window.addEventListener('keydown', e => {
+  if (e.key === 'r' || e.key === 'R') {
+    STATE.cx=-0.5; STATE.cy=0; STATE.scale=3.5; STATE.iterBoost=0; scheduleRender();
+  } else if (e.key === '+' || e.key === '=') {
+    STATE.iterBoost++; scheduleRender();
+  } else if (e.key === '-' || e.key === '_') {
+    STATE.iterBoost--; scheduleRender();
+  } else if (e.key === 's' || e.key === 'S') {
+    savePNG();
+  }
+});
+
+fractalSel.addEventListener('change', e => {
+  STATE.fractal = e.target.value;
+  if (STATE.fractal.startsWith('julia')) { STATE.cx=0; STATE.cy=0; STATE.scale=3.5; }
+  else if (STATE.fractal === 'burningship') { STATE.cx=-0.5; STATE.cy=-0.5; STATE.scale=3.5; }
+  else { STATE.cx=-0.5; STATE.cy=0; STATE.scale=3.5; }
+  scheduleRender();
+});
+paletteSel.addEventListener('change', e => { STATE.palette = +e.target.value; scheduleRender(); });
+document.getElementById('reset').addEventListener('click', () => {
+  STATE.cx=-0.5; STATE.cy=0; STATE.scale=3.5; STATE.iterBoost=0; scheduleRender();
+});
+document.getElementById('save').addEventListener('click', savePNG);
+
+function savePNG() {
+  const a = document.createElement('a');
+  a.download = `fractal_${Date.now()}.png`;
+  a.href = canvas.toDataURL('image/png');
+  a.click();
+}
+
+resize();
+</script>
+</body>
+</html>
