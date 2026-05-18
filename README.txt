@@ -1,21 +1,5 @@
 Fractal Explorer
 ================
-
-TWO versions:
-
-1) FAST DESKTOP APP (recommended)
-   Double-click  run_explorer.bat
-   It will auto-install numpy + pygame the first time, then launch a
-   native window. Rendering uses vectorized NumPy — many times faster
-   than the browser.
-
-   Requirements: Python 3 on PATH. If you don't have Python, install
-   from https://www.python.org/downloads/  (check "Add to PATH" during
-   install), then run run_explorer.bat again.
-
-2) BROWSER VERSION (slower, no install)
-   Double-click index.html
-
 Controls
 --------
 Click           : zoom in (4x faster zoom on click)
